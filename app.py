@@ -9,25 +9,29 @@ import yfinance as yf
 st.set_page_config(page_title="AI 주식 레이더", page_icon="📈", layout="wide", initial_sidebar_state="expanded")
 
 STOCKS_FILE="stocks.json"
+PORTFOLIO_FILE="portfolio.json"
+MEMO_FILE="memos.json"
 LOG_FILE="prediction_log.csv"
 
-DEFAULT_STOCKS={"삼성전자":"005930.KS","SK하이닉스":"000660.KS","엔비디아":"NVDA","테슬라":"TSLA","AMD":"AMD","SOXL":"SOXL"}
+DEFAULT_STOCKS={
+    "삼성전자":"005930.KS","SK하이닉스":"000660.KS","엔비디아":"NVDA","테슬라":"TSLA",
+    "AMD":"AMD","SOXL":"SOXL","대우건설":"047040.KS","샌디스크":"SNDK"
+}
 
 SEARCH_MAP={
     "삼성":"삼성전자|005930.KS","삼성전자":"삼성전자|005930.KS","005930":"삼성전자|005930.KS",
     "하이닉스":"SK하이닉스|000660.KS","sk하이닉스":"SK하이닉스|000660.KS","000660":"SK하이닉스|000660.KS",
+    "대우건설":"대우건설|047040.KS","대우":"대우건설|047040.KS","047040":"대우건설|047040.KS",
+    "샌디스크":"샌디스크|SNDK","sandisk":"샌디스크|SNDK","sndk":"샌디스크|SNDK",
     "엔비":"엔비디아|NVDA","엔비디아":"엔비디아|NVDA","nvidia":"엔비디아|NVDA","nvda":"엔비디아|NVDA",
     "테슬라":"테슬라|TSLA","tesla":"테슬라|TSLA","tsla":"테슬라|TSLA",
-    "amd":"AMD|AMD","에이엠디":"AMD|AMD",
-    "soxl":"SOXL|SOXL",
+    "amd":"AMD|AMD","에이엠디":"AMD|AMD","soxl":"SOXL|SOXL",
     "애플":"애플|AAPL","apple":"애플|AAPL","aapl":"애플|AAPL",
     "마소":"마이크로소프트|MSFT","마이크로소프트":"마이크로소프트|MSFT","msft":"마이크로소프트|MSFT",
     "구글":"알파벳|GOOGL","알파벳":"알파벳|GOOGL","googl":"알파벳|GOOGL",
     "아마존":"아마존|AMZN","amazon":"아마존|AMZN","amzn":"아마존|AMZN",
-    "메타":"메타|META","meta":"메타|META",
-    "tsmc":"TSMC|TSM","티에스엠씨":"TSMC|TSM",
-    "브로드컴":"브로드컴|AVGO","avgo":"브로드컴|AVGO",
-    "팔란티어":"팔란티어|PLTR","pltr":"팔란티어|PLTR",
+    "메타":"메타|META","meta":"메타|META","tsmc":"TSMC|TSM","티에스엠씨":"TSMC|TSM",
+    "브로드컴":"브로드컴|AVGO","avgo":"브로드컴|AVGO","팔란티어":"팔란티어|PLTR","pltr":"팔란티어|PLTR",
     "코스피":"KOSPI|^KS11","나스닥":"NASDAQ|^IXIC","s&p":"S&P500|^GSPC","sp500":"S&P500|^GSPC",
 }
 
@@ -57,7 +61,6 @@ html, body, [class*="css"] {font-family:'Noto Sans KR', sans-serif;}
 .barbg{height:8px;border-radius:99px;background:rgba(255,255,255,.13);margin-top:8px;overflow:hidden}
 .barg{height:8px;background:#00d084;border-radius:99px}
 .barr{height:8px;background:#ff4d5d;border-radius:99px}
-[data-testid="stDataFrame"] {background: rgba(255,255,255,.03); border-radius:18px; overflow:hidden}
 </style>
 """
 st.markdown(CSS, unsafe_allow_html=True)
@@ -180,11 +183,10 @@ def market_calendar():
         [today+timedelta(days=10),"ETF 리밸런싱/편입 이슈 확인","테마 ETF 변동 가능","ETF"],
         [today+timedelta(days=14),"우주·방산 테마 뉴스 체크","SpaceX/발사/위성 관련주","테마"],
     ]
-    earnings = []
     names=["엔비디아","테슬라","AMD","애플","마이크로소프트","구글","아마존","메타","TSMC","브로드컴","삼성전자","SK하이닉스"]
     for i,n in enumerate(names):
-        earnings.append([today+timedelta(days=2+i*2),f"{n} 실적 발표/가이던스 확인","정확한 날짜는 기업 공시 기준으로 재확인 필요","실적"])
-    return sorted(fixed+earnings, key=lambda x:x[0])
+        fixed.append([today+timedelta(days=2+i*2),f"{n} 실적 발표/가이던스 확인","정확한 날짜는 기업 공시 기준으로 재확인 필요","실적"])
+    return sorted(fixed,key=lambda x:x[0])
 
 def load_log():
     if os.path.exists(LOG_FILE):
@@ -222,34 +224,35 @@ def update_log():
     return df
 
 stocks=load_stocks()
+portfolio=rjson(PORTFOLIO_FILE,{})
+memos=rjson(MEMO_FILE,{"global":"","stock":{}})
 
 with st.sidebar:
     st.header("⚙️ 설정")
-    st.caption("자동 새로고침은 화면 전체를 심하게 깜빡이지 않게 기본 간격을 길게 잡았어.")
+    st.caption("자동 새로고침은 기본 3분이라 덜 거슬림.")
     auto=st.toggle("자동 새로고침",value=True)
     sec=st.slider("간격(초)",60,600,180,30)
     if auto:st.markdown(f"<meta http-equiv='refresh' content='{sec}'>",unsafe_allow_html=True)
     st.divider()
     st.subheader("⭐ 종목 찾기")
-    q=st.text_input("종목 이름만 입력",placeholder="삼성전자 / 엔비디아 / 테슬라 / AAPL")
+    q=st.text_input("종목 이름만 입력",placeholder="대우건설 / 샌디스크 / 삼성전자 / AAPL")
     found=resolve_stock(q) if q else None
-    if found:
-        st.success(f"찾음: {found[0]} · {found[1]}")
-    elif q:
-        st.warning("못 찾으면 티커를 직접 입력해도 됨. 예: NVDA, 005930")
-    if st.button("추가/저장",use_container_width=True):
+    if found: st.success(f"찾음: {found[0]} · {found[1]}")
+    elif q: st.warning("못 찾으면 티커를 직접 입력해도 됨. 예: NVDA, 005930")
+    if st.button("관심종목 추가",use_container_width=True):
         if found:
             stocks[found[0]]=found[1]; wjson(STOCKS_FILE,stocks); st.success("저장됨")
-        else:
-            st.warning("종목을 못 찾았어.")
+        else: st.warning("종목을 못 찾았어.")
     rm=st.selectbox("삭제",["선택 안 함"]+list(stocks.keys()))
     if st.button("삭제",use_container_width=True) and rm!="선택 안 함":
-        stocks.pop(rm,None); wjson(STOCKS_FILE,stocks); st.success("삭제됨")
+        stocks.pop(rm,None); portfolio.pop(rm,None); memos.get("stock",{}).pop(rm,None)
+        wjson(STOCKS_FILE,stocks); wjson(PORTFOLIO_FILE,portfolio); wjson(MEMO_FILE,memos)
+        st.success("삭제됨")
 
-st.markdown("<div class='hero'><h1>📈 AI 주식 레이더</h1><div>오늘 시장에서 중요한 흐름, 뉴스, 일정, 관심 종목을 한눈에 확인하세요.</div></div>",unsafe_allow_html=True)
+st.markdown("<div class='hero'><h1>📈 AI 주식 레이더</h1><div>보유종목, 수익률, 뉴스, 일정, 관심종목 메모를 한눈에 확인하세요.</div></div>",unsafe_allow_html=True)
 st.caption(f"업데이트: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} · 예측기간: {period_text()}")
 
-tabs=st.tabs(["🏠 브리핑","🚨 긴급 속보","📅 전체 캘린더","📊 종목 카드","📰 뉴스","📈 차트","🎯 기록"])
+tabs=st.tabs(["🏠 메인","🔎 종목 상세","🚨 긴급 속보","📅 전체 캘린더","📊 종목 카드","📰 뉴스","📈 차트","🎯 기록"])
 cache={}; rows=[]; radar=[]; all_news=[]
 
 for n,t in stocks.items():
@@ -265,51 +268,80 @@ for n,t in stocks.items():
 df=pd.DataFrame(radar).sort_values("상승확률",ascending=False) if radar else pd.DataFrame()
 
 with tabs[0]:
-    if not df.empty:
-        top=df.iloc[0]; weak=df.sort_values("하락확률",ascending=False).iloc[0]
-        st.markdown(f"<div class='card blue'><div class='midtitle'>📌 오늘 한 줄 브리핑</div>오늘은 <b>{top['종목']}</b>가 가장 강하게 잡혀. 예측 기간은 <b>{period_text()}</b>이고, 상승 가능성은 <b>{top['상승확률']}%</b>야.<br>반대로 <b>{weak['종목']}</b>는 주의 신호가 상대적으로 높아.</div>",unsafe_allow_html=True)
-        c1,c2,c3=st.columns(3)
-        c1.markdown(f"<div class='card green'><div class='tiny'>🥇 가장 강한 종목</div><div class='big'>{top['종목']}</div><div>{top['상승확률']}% · {stars(top['상승확률'])}</div><div class='tiny'>{top['메모']}</div></div>",unsafe_allow_html=True)
-        c2.markdown(f"<div class='card red'><div class='tiny'>⚠️ 주의 종목</div><div class='big'>{weak['종목']}</div><div>하락주의 {weak['하락확률']}%</div><div class='tiny'>{weak['메모']}</div></div>",unsafe_allow_html=True)
-        c3.markdown(f"<div class='card orange'><div class='tiny'>⏱ 예측 기준</div><div class='big'>3~4일</div><div>{period_text()}</div><div class='tiny'>단기 뉴스/차트 흐름 기준</div></div>",unsafe_allow_html=True)
-        st.subheader("신호 랭킹")
-        for _,r in df.iterrows():
-            cls="green" if r["상승확률"]>=60 else "red" if r["하락확률"]>=60 else "orange"
-            bar = r["상승확률"]
-            st.markdown(f"<div class='rankrow {cls}'><b>{r['종목']}</b> <span class='badge'>{r['신호']}</span><span class='tiny'>{r['기간']}</span><br>상승 가능성 {r['상승확률']}% / 하락 주의 {r['하락확률']}%<div class='barbg'><div class='barg' style='width:{bar}%'></div></div><div class='tiny'>{r['메모']} · {r['근거']}</div></div>",unsafe_allow_html=True)
-        if st.button("오늘 예측 저장",use_container_width=True):
-            save_log(rows); st.success("저장 완료")
+    st.subheader("🏠 메인 메뉴")
+    global_memo=st.text_area("📝 전체 투자 메모", value=memos.get("global",""), height=90, placeholder="예: 실적 전까지 무리한 추격매수 금지")
+    if st.button("전체 메모 저장",use_container_width=True):
+        memos["global"]=global_memo; wjson(MEMO_FILE,memos); st.success("메모 저장됨")
+
+    st.markdown("### 내 관심종목 / 보유 현황")
+    for _,r in df.iterrows():
+        n=r["종목"]; t=r["티커"]; info=cache.get(t)
+        holding=portfolio.get(n,{"qty":0.0,"avg":0.0})
+        qty=float(holding.get("qty",0) or 0)
+        avgp=float(holding.get("avg",0) or 0)
+        now=float(info["last"]) if info else 0
+        value=qty*now
+        cost=qty*avgp
+        pnl=value-cost
+        pnl_pct=(pnl/cost*100) if cost else 0
+        cls="green" if pnl>=0 and cost else "red" if cost else "blue"
+        st.markdown(f"<div class='card {cls}'><span class='badge'>{n}</span><span class='badge'>{t}</span><div class='big'>{now:,.2f}</div><div>보유 {qty:g}주 · 평단 {avgp:,.2f}</div><div>평가금액 {value:,.0f} / 손익 {pnl:+,.0f}원 ({pnl_pct:+.2f}%)</div><div class='tiny'>AI: {r['신호']} · 상승 {r['상승확률']}% · 이유: {r['근거'] or '뉴스/흐름 확인 중'}</div></div>", unsafe_allow_html=True)
+        c1,c2,c3=st.columns([1,1,2])
+        with c1:
+            new_qty=st.number_input(f"{n} 보유 주식 수", min_value=0.0, value=qty, step=0.0001, format="%.4f", key=f"qty_{n}")
+        with c2:
+            new_avg=st.number_input(f"{n} 평단 가격", min_value=0.0, value=avgp, step=0.01, format="%.2f", key=f"avg_{n}")
+        with c3:
+            sm=st.text_input(f"{n} 메모", value=memos.get("stock",{}).get(n,""), key=f"memo_{n}", placeholder="예: 실적 발표 전까지 관망")
+        if st.button(f"{n} 저장", key=f"save_{n}", use_container_width=True):
+            portfolio[n]={"qty":new_qty,"avg":new_avg}
+            memos.setdefault("stock",{})[n]=sm
+            wjson(PORTFOLIO_FILE,portfolio); wjson(MEMO_FILE,memos)
+            st.success(f"{n} 저장됨")
 
 with tabs[1]:
-    hot_news=[]
+    pick=st.selectbox("자세히 볼 종목", list(stocks.keys()))
+    t=stocks[pick]; info=cache.get(t)
+    r=df[df["종목"]==pick].iloc[0] if not df.empty and len(df[df["종목"]==pick]) else None
+    if r is not None:
+        st.markdown(f"<div class='card blue'><div class='big'>{pick}</div><div>{r['신호']} · 상승 {r['상승확률']}% / 하락 {r['하락확률']}%</div><div class='tiny'>예측기간: {r['기간']}<br>왜 그렇게 나왔나: {r['근거'] or '뚜렷한 근거 부족'}<br>메모: {memos.get('stock',{}).get(pick,'없음')}</div></div>", unsafe_allow_html=True)
+    if info:
+        chart=info["hist"][["Close"]].copy()
+        chart["짧은 흐름"]=chart["Close"].rolling(5).mean()
+        chart["중간 흐름"]=chart["Close"].rolling(20).mean()
+        st.line_chart(chart)
+    st.subheader("관련 뉴스")
     for stock,sc,lab,reason,x in all_news:
-        if sc>=75 or sc<=30: hot_news.append((stock,sc,lab,reason,x))
+        if stock==pick:
+            emoji="🟢" if lab=="호재" else "🔴" if lab=="악재" else "⚪"
+            st.markdown(f"<div class='news'>{emoji} <b>{lab} {sc}점</b><br><a href='{x['link']}' target='_blank'>{x['title']}</a><br><span class='tiny'>{reason}</span></div>", unsafe_allow_html=True)
+
+with tabs[2]:
+    hot_news=[x for x in all_news if x[1]>=75 or x[1]<=30]
     if hot_news:
         for stock,sc,lab,reason,x in sorted(hot_news,key=lambda z:abs(z[1]-50),reverse=True)[:10]:
             cls="green" if lab=="호재" else "red"
-            st.markdown(f"<div class='card {cls}'><span class='badge'>🚨 긴급</span><span class='badge'>{stock}</span><div class='midtitle'>{lab} {sc}점</div><a href='{x['link']}' target='_blank'>{x['title']}</a><div class='tiny'>{reason}</div></div>",unsafe_allow_html=True)
+            st.markdown(f"<div class='card {cls}'><span class='badge'>🚨 긴급</span><span class='badge'>{stock}</span><div class='midtitle'>{lab} {sc}점</div><a href='{x['link']}' target='_blank'>{x['title']}</a><div class='tiny'>{reason}</div></div>", unsafe_allow_html=True)
     else: st.info("지금은 강한 속보 신호가 없어.")
 
-with tabs[2]:
+with tabs[3]:
     st.subheader("📅 전체 시장 캘린더")
     st.caption("무료 공개 데이터 기반이라 정확한 실적일은 기업 공시/증권사 캘린더로 한 번 더 확인하는 게 좋아.")
     for d,title,memo,typ in market_calendar():
-        st.markdown(f"<div class='card blue'><span class='badge'>{typ}</span><span class='badge'>{d.strftime('%m/%d')}</span><b>{title}</b><br><span class='tiny'>{memo}</span></div>",unsafe_allow_html=True)
-
-with tabs[3]:
-    cols=st.columns(2)
-    for i,r in df.iterrows():
-        cls="green" if r["상승확률"]>=60 else "red" if r["하락확률"]>=60 else "orange"
-        with cols[i%2]:
-            st.markdown(f"<div class='card {cls}'><div class='tiny'>{r['종목']} · {r['티커']}</div><div class='big'>{r['신호']}</div><div>상승 {r['상승확률']}% / 하락 {r['하락확률']}%</div><div>{stars(r['상승확률'])}</div><div class='tiny'>{r['기간']}<br>{r['메모']}<br>{r['근거']}</div></div>",unsafe_allow_html=True)
+        st.markdown(f"<div class='card blue'><span class='badge'>{typ}</span><span class='badge'>{d.strftime('%m/%d')}</span><b>{title}</b><br><span class='tiny'>{memo}</span></div>", unsafe_allow_html=True)
 
 with tabs[4]:
-    for stock,sc,lab,reason,x in sorted(all_news,key=lambda z:z[1],reverse=True):
-        emoji="🟢" if lab=="호재" else "🔴" if lab=="악재" else "⚪"
-        st.markdown(f"<div class='news'>{emoji} <b>{stock} · {lab} {sc}점</b><br><a href='{x['link']}' target='_blank'>{x['title']}</a><br><span class='tiny'>{reason}</span></div>",unsafe_allow_html=True)
+    for _,r in df.iterrows():
+        cls="green" if r["상승확률"]>=60 else "red" if r["하락확률"]>=60 else "orange"
+        st.markdown(f"<div class='rankrow {cls}'><b>{r['종목']}</b> <span class='badge'>{r['신호']}</span><span class='tiny'>{r['기간']}</span><br>상승 가능성 {r['상승확률']}% / 하락 주의 {r['하락확률']}%<div class='barbg'><div class='barg' style='width:{r['상승확률']}%'></div></div><div class='tiny'>{r['메모']} · {r['근거']}</div></div>", unsafe_allow_html=True)
 
 with tabs[5]:
-    pick=st.selectbox("차트 종목",list(stocks.keys()))
+    for stock,sc,lab,reason,x in sorted(all_news,key=lambda z:z[1],reverse=True):
+        emoji="🟢" if lab=="호재" else "🔴" if lab=="악재" else "⚪"
+        st.markdown(f"<div class='news'>{emoji} <b>{stock} · {lab} {sc}점</b><br><a href='{x['link']}' target='_blank'>{x['title']}</a><br><span class='tiny'>{reason}</span></div>", unsafe_allow_html=True)
+
+with tabs[6]:
+    pick=st.selectbox("차트 종목", list(stocks.keys()), key="chartpick")
     info=cache.get(stocks[pick])
     if info:
         chart=info["hist"][["Close"]].copy()
@@ -318,9 +350,11 @@ with tabs[5]:
         chart["긴 흐름"]=chart["Close"].rolling(60).mean()
         st.line_chart(chart)
 
-with tabs[6]:
+with tabs[7]:
+    if st.button("오늘 예측 저장", use_container_width=True):
+        save_log(rows); st.success("저장 완료")
     log=update_log()
-    if log.empty:st.info("아직 기록 없음. 브리핑 탭에서 오늘 예측 저장 눌러.")
+    if log.empty: st.info("아직 기록 없음.")
     else:
         st.dataframe(log,use_container_width=True)
         valid=log[log["correct"].isin([True,False])]
