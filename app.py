@@ -33,6 +33,12 @@ SEARCH_MAP={
     "메타":"메타|META","meta":"메타|META","tsmc":"TSMC|TSM","티에스엠씨":"TSMC|TSM",
     "브로드컴":"브로드컴|AVGO","avgo":"브로드컴|AVGO","팔란티어":"팔란티어|PLTR","pltr":"팔란티어|PLTR",
     "코스피":"KOSPI|^KS11","나스닥":"NASDAQ|^IXIC","s&p":"S&P500|^GSPC","sp500":"S&P500|^GSPC",
+    "현대차":"현대차|005380.KS","기아":"기아|000270.KS","카카오":"카카오|035720.KS","네이버":"NAVER|035420.KS",
+    "셀트리온":"셀트리온|068270.KS","포스코":"POSCO홀딩스|005490.KS","posco":"POSCO홀딩스|005490.KS",
+    "lg에너지솔루션":"LG에너지솔루션|373220.KS","lg엔솔":"LG에너지솔루션|373220.KS",
+    "한화에어로":"한화에어로스페이스|012450.KS","한화에어로스페이스":"한화에어로스페이스|012450.KS",
+    "두산에너빌리티":"두산에너빌리티|034020.KS","대한항공":"대한항공|003490.KS",
+    "코스닥":"KOSDAQ|^KQ11",
 }
 
 GOOD=["상승","급등","호재","수주","계약","흑자","성장","상향","매수","공급","승인","성공","강세","반등","신고가","수혜","실적 개선","목표가 상향","beat","surge","rally","record","growth","upgrade","profit","contract","approved","strong","bullish","buy"]
@@ -60,7 +66,6 @@ html, body, [class*="css"] {font-family:'Noto Sans KR', sans-serif;}
 .rankrow{border:1px solid rgba(180,190,220,.15);border-radius:18px;padding:14px 15px;margin:9px 0;background:rgba(255,255,255,.052)}
 .barbg{height:8px;border-radius:99px;background:rgba(255,255,255,.13);margin-top:8px;overflow:hidden}
 .barg{height:8px;background:#00d084;border-radius:99px}
-.barr{height:8px;background:#ff4d5d;border-radius:99px}
 </style>
 """
 st.markdown(CSS, unsafe_allow_html=True)
@@ -79,16 +84,69 @@ def load_stocks():
         s=DEFAULT_STOCKS.copy(); wjson(STOCKS_FILE,s)
     return s
 
+@st.cache_data(ttl=600)
+def fx_rate():
+    try:
+        h=yf.Ticker("USDKRW=X").history(period="5d")
+        if h is not None and not h.empty:
+            return float(h["Close"].dropna().iloc[-1])
+    except Exception:
+        pass
+    return 1380.0
+
+def is_us_ticker(ticker):
+    return not (ticker.endswith(".KS") or ticker.endswith(".KQ") or ticker.startswith("^"))
+
+def to_krw(price_value, ticker):
+    if price_value is None:
+        return 0
+    return price_value * fx_rate() if is_us_ticker(ticker) else price_value
+
+def money(v):
+    try:return f"{v:,.0f}원"
+    except Exception:return "0원"
+
 def resolve_stock(text):
     q=text.strip().lower()
     if not q:return None
     if q in SEARCH_MAP:
         name,ticker=SEARCH_MAP[q].split("|")
         return name,ticker
-    if re.fullmatch(r"[A-Za-z.^]{1,8}", text.strip()):
-        return text.strip().upper(), text.strip().upper()
     if re.fullmatch(r"\d{6}", text.strip()):
         return text.strip(), text.strip()+".KS"
+    found=yahoo_search(text.strip())
+    if found:
+        return found
+    if re.fullmatch(r"[A-Za-z.^]{1,10}", text.strip()):
+        return text.strip().upper(), text.strip().upper()
+    return None
+
+@st.cache_data(ttl=3600)
+def yahoo_search(query):
+    try:
+        url="https://query1.finance.yahoo.com/v1/finance/search"
+        r=requests.get(url,params={"q":query,"quotesCount":10,"newsCount":0},timeout=8,headers={"User-Agent":"Mozilla/5.0"})
+        r.raise_for_status()
+        data=r.json()
+        quotes=data.get("quotes",[])
+        preferred=[]
+        for q in quotes:
+            sym=q.get("symbol","")
+            name=q.get("shortname") or q.get("longname") or q.get("name") or sym
+            typ=q.get("quoteType","")
+            exch=q.get("exchange","")
+            if not sym or typ not in ["EQUITY","ETF","INDEX"]:
+                continue
+            score=0
+            if sym.endswith(".KS") or sym.endswith(".KQ"): score+=10
+            if query.lower() in name.lower() or query.lower() in sym.lower(): score+=5
+            if exch in ["KSC","KOE","NMS","NYQ","NGM","PCX"]: score+=2
+            preferred.append((score,name,sym))
+        if preferred:
+            preferred=sorted(preferred,reverse=True)
+            return preferred[0][1], preferred[0][2]
+    except Exception:
+        return None
     return None
 
 @st.cache_data(ttl=60)
@@ -105,7 +163,7 @@ def price(ticker):
         hi20=float(c.tail(20).max()); lo20=float(c.tail(20).min())
         vol=float(h["Volume"].dropna().iloc[-1]) if "Volume" in h and len(h["Volume"].dropna()) else 0
         avgv=float(h["Volume"].dropna().tail(20).mean()) if "Volume" in h and len(h["Volume"].dropna()) else 0
-        return {"hist":h,"last":last,"chg":chg,"ma5":ma5,"ma20":ma20,"ma60":ma60,"hi20":hi20,"lo20":lo20,"vol":vol,"avgv":avgv}
+        return {"hist":h,"last":last,"last_krw":to_krw(last,ticker),"chg":chg,"ma5":ma5,"ma20":ma20,"ma60":ma60,"hi20":hi20,"lo20":lo20,"vol":vol,"avgv":avgv}
     except Exception:return None
 
 @st.cache_data(ttl=180)
@@ -175,7 +233,7 @@ def period_text():
 
 def market_calendar():
     today=date.today()
-    fixed=[
+    items=[
         [today+timedelta(days=1),"미국 CPI / 물가 관련 일정 확인","시장 전체 흔들릴 수 있음","경제"],
         [today+timedelta(days=3),"FOMC·금리 발언 체크","반도체·성장주 영향 큼","경제"],
         [today+timedelta(days=5),"주요 빅테크 실적 시즌 감시","엔비디아·AMD·테슬라 영향 가능","실적"],
@@ -185,14 +243,14 @@ def market_calendar():
     ]
     names=["엔비디아","테슬라","AMD","애플","마이크로소프트","구글","아마존","메타","TSMC","브로드컴","삼성전자","SK하이닉스"]
     for i,n in enumerate(names):
-        fixed.append([today+timedelta(days=2+i*2),f"{n} 실적 발표/가이던스 확인","정확한 날짜는 기업 공시 기준으로 재확인 필요","실적"])
-    return sorted(fixed,key=lambda x:x[0])
+        items.append([today+timedelta(days=2+i*2),f"{n} 실적 발표/가이던스 확인","정확한 날짜는 기업 공시 기준으로 재확인 필요","실적"])
+    return sorted(items,key=lambda x:x[0])
 
 def load_log():
     if os.path.exists(LOG_FILE):
         try:return pd.read_csv(LOG_FILE)
         except Exception:pass
-    return pd.DataFrame(columns=["date","period","name","ticker","signal","up_pct","down_pct","price","next_result_pct","correct"])
+    return pd.DataFrame(columns=["date","period","name","ticker","signal","up_pct","down_pct","price_krw","next_result_pct","correct"])
 
 def save_log(rows):
     df=load_log(); today=date.today().isoformat(); tick=[r["ticker"] for r in rows]
@@ -229,16 +287,15 @@ memos=rjson(MEMO_FILE,{"global":"","stock":{}})
 
 with st.sidebar:
     st.header("⚙️ 설정")
-    st.caption("자동 새로고침은 기본 3분이라 덜 거슬림.")
     auto=st.toggle("자동 새로고침",value=True)
     sec=st.slider("간격(초)",60,600,180,30)
     if auto:st.markdown(f"<meta http-equiv='refresh' content='{sec}'>",unsafe_allow_html=True)
     st.divider()
     st.subheader("⭐ 종목 찾기")
-    q=st.text_input("종목 이름만 입력",placeholder="대우건설 / 샌디스크 / 삼성전자 / AAPL")
+    q=st.text_input("종목 이름만 입력",placeholder="대우건설 / 샌디스크 / 삼성전자 / 애플")
     found=resolve_stock(q) if q else None
     if found: st.success(f"찾음: {found[0]} · {found[1]}")
-    elif q: st.warning("못 찾으면 티커를 직접 입력해도 됨. 예: NVDA, 005930")
+    elif q: st.warning("못 찾으면 영어명이나 종목코드도 가능. 예: Apple, 005930")
     if st.button("관심종목 추가",use_container_width=True):
         if found:
             stocks[found[0]]=found[1]; wjson(STOCKS_FILE,stocks); st.success("저장됨")
@@ -249,8 +306,8 @@ with st.sidebar:
         wjson(STOCKS_FILE,stocks); wjson(PORTFOLIO_FILE,portfolio); wjson(MEMO_FILE,memos)
         st.success("삭제됨")
 
-st.markdown("<div class='hero'><h1>📈 AI 주식 레이더</h1><div>보유종목, 수익률, 뉴스, 일정, 관심종목 메모를 한눈에 확인하세요.</div></div>",unsafe_allow_html=True)
-st.caption(f"업데이트: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} · 예측기간: {period_text()}")
+st.markdown("<div class='hero'><h1>📈 AI 주식 레이더</h1><div>보유종목, 수익률, 뉴스, 일정, 관심종목 메모를 원화 기준으로 확인하세요.</div></div>",unsafe_allow_html=True)
+st.caption(f"업데이트: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} · 예측기간: {period_text()} · 환율 기준: 1달러 ≈ {fx_rate():,.0f}원")
 
 tabs=st.tabs(["🏠 메인","🔎 종목 상세","🚨 긴급 속보","📅 전체 캘린더","📊 종목 카드","📰 뉴스","📈 차트","🎯 기록"])
 cache={}; rows=[]; radar=[]; all_news=[]
@@ -261,8 +318,8 @@ for n,t in stocks.items():
     scored=[(*score_news(x["title"]),x) for x in ns]
     avg=int(sum(x[0] for x in scored)/len(scored)) if scored else 50
     sig,up,down,memo,why=ai_signal(avg,info)
-    radar.append({"종목":n,"티커":t,"신호":sig,"상승확률":up,"하락확률":down,"뉴스점수":avg,"등락률":round(info["chg"],2) if info else 0,"메모":memo,"근거":" · ".join(why),"기간":period_text()})
-    rows.append({"date":date.today().isoformat(),"period":period_text(),"name":n,"ticker":t,"signal":sig,"up_pct":up,"down_pct":down,"price":round(info["last"],2) if info else "","next_result_pct":"","correct":""})
+    radar.append({"종목":n,"티커":t,"신호":sig,"상승확률":up,"하락확률":down,"뉴스점수":avg,"등락률":round(info["chg"],2) if info else 0,"현재가원":round(info["last_krw"]) if info else 0,"메모":memo,"근거":" · ".join(why),"기간":period_text()})
+    rows.append({"date":date.today().isoformat(),"period":period_text(),"name":n,"ticker":t,"signal":sig,"up_pct":up,"down_pct":down,"price_krw":round(info["last_krw"]) if info else "","next_result_pct":"","correct":""})
     for x in scored: all_news.append((n,)+x)
 
 df=pd.DataFrame(radar).sort_values("상승확률",ascending=False) if radar else pd.DataFrame()
@@ -274,23 +331,27 @@ with tabs[0]:
         memos["global"]=global_memo; wjson(MEMO_FILE,memos); st.success("메모 저장됨")
 
     st.markdown("### 내 관심종목 / 보유 현황")
+    total_value=0; total_cost=0
     for _,r in df.iterrows():
         n=r["종목"]; t=r["티커"]; info=cache.get(t)
         holding=portfolio.get(n,{"qty":0.0,"avg":0.0})
         qty=float(holding.get("qty",0) or 0)
-        avgp=float(holding.get("avg",0) or 0)
-        now=float(info["last"]) if info else 0
+        avgp=float(holding.get("avg",0) or 0)   # 평단은 무조건 원화 입력
+        now=float(info["last_krw"]) if info else 0
         value=qty*now
         cost=qty*avgp
         pnl=value-cost
         pnl_pct=(pnl/cost*100) if cost else 0
+        total_value += value
+        total_cost += cost
         cls="green" if pnl>=0 and cost else "red" if cost else "blue"
-        st.markdown(f"<div class='card {cls}'><span class='badge'>{n}</span><span class='badge'>{t}</span><div class='big'>{now:,.2f}</div><div>보유 {qty:g}주 · 평단 {avgp:,.2f}</div><div>평가금액 {value:,.0f} / 손익 {pnl:+,.0f}원 ({pnl_pct:+.2f}%)</div><div class='tiny'>AI: {r['신호']} · 상승 {r['상승확률']}% · 이유: {r['근거'] or '뉴스/흐름 확인 중'}</div></div>", unsafe_allow_html=True)
+        sub=f"({info['last']:,.2f} USD)" if info and is_us_ticker(t) else ""
+        st.markdown(f"<div class='card {cls}'><span class='badge'>{n}</span><span class='badge'>{t}</span><div class='big'>{money(now)}</div><div class='tiny'>{sub}</div><div>보유 {qty:g}주 · 평단 {money(avgp)}</div><div>평가금액 {money(value)} / 손익 {pnl:+,.0f}원 ({pnl_pct:+.2f}%)</div><div class='tiny'>AI: {r['신호']} · 상승 {r['상승확률']}% · 이유: {r['근거'] or '뉴스/흐름 확인 중'}</div></div>", unsafe_allow_html=True)
         c1,c2,c3=st.columns([1,1,2])
         with c1:
             new_qty=st.number_input(f"{n} 보유 주식 수", min_value=0.0, value=qty, step=0.0001, format="%.4f", key=f"qty_{n}")
         with c2:
-            new_avg=st.number_input(f"{n} 평단 가격", min_value=0.0, value=avgp, step=0.01, format="%.2f", key=f"avg_{n}")
+            new_avg=st.number_input(f"{n} 평단 가격(원화)", min_value=0.0, value=avgp, step=1.0, format="%.0f", key=f"avg_{n}")
         with c3:
             sm=st.text_input(f"{n} 메모", value=memos.get("stock",{}).get(n,""), key=f"memo_{n}", placeholder="예: 실적 발표 전까지 관망")
         if st.button(f"{n} 저장", key=f"save_{n}", use_container_width=True):
@@ -298,13 +359,17 @@ with tabs[0]:
             memos.setdefault("stock",{})[n]=sm
             wjson(PORTFOLIO_FILE,portfolio); wjson(MEMO_FILE,memos)
             st.success(f"{n} 저장됨")
+    total_pnl=total_value-total_cost
+    total_pct=(total_pnl/total_cost*100) if total_cost else 0
+    st.markdown(f"<div class='card orange'><div class='midtitle'>💰 전체 보유 평가</div>총 평가금액 <b>{money(total_value)}</b><br>총 손익 <b>{total_pnl:+,.0f}원</b> ({total_pct:+.2f}%)</div>", unsafe_allow_html=True)
 
 with tabs[1]:
     pick=st.selectbox("자세히 볼 종목", list(stocks.keys()))
     t=stocks[pick]; info=cache.get(t)
     r=df[df["종목"]==pick].iloc[0] if not df.empty and len(df[df["종목"]==pick]) else None
     if r is not None:
-        st.markdown(f"<div class='card blue'><div class='big'>{pick}</div><div>{r['신호']} · 상승 {r['상승확률']}% / 하락 {r['하락확률']}%</div><div class='tiny'>예측기간: {r['기간']}<br>왜 그렇게 나왔나: {r['근거'] or '뚜렷한 근거 부족'}<br>메모: {memos.get('stock',{}).get(pick,'없음')}</div></div>", unsafe_allow_html=True)
+        sub=f" / {info['last']:,.2f} USD" if info and is_us_ticker(t) else ""
+        st.markdown(f"<div class='card blue'><div class='big'>{pick}</div><div>현재가 {money(r['현재가원'])}{sub}</div><div>{r['신호']} · 상승 {r['상승확률']}% / 하락 {r['하락확률']}%</div><div class='tiny'>예측기간: {r['기간']}<br>왜 그렇게 나왔나: {r['근거'] or '뚜렷한 근거 부족'}<br>메모: {memos.get('stock',{}).get(pick,'없음')}</div></div>", unsafe_allow_html=True)
     if info:
         chart=info["hist"][["Close"]].copy()
         chart["짧은 흐름"]=chart["Close"].rolling(5).mean()
@@ -333,7 +398,7 @@ with tabs[3]:
 with tabs[4]:
     for _,r in df.iterrows():
         cls="green" if r["상승확률"]>=60 else "red" if r["하락확률"]>=60 else "orange"
-        st.markdown(f"<div class='rankrow {cls}'><b>{r['종목']}</b> <span class='badge'>{r['신호']}</span><span class='tiny'>{r['기간']}</span><br>상승 가능성 {r['상승확률']}% / 하락 주의 {r['하락확률']}%<div class='barbg'><div class='barg' style='width:{r['상승확률']}%'></div></div><div class='tiny'>{r['메모']} · {r['근거']}</div></div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='rankrow {cls}'><b>{r['종목']}</b> <span class='badge'>{r['신호']}</span><span class='tiny'>{r['기간']}</span><br>현재가 {money(r['현재가원'])} · 상승 가능성 {r['상승확률']}% / 하락 주의 {r['하락확률']}%<div class='barbg'><div class='barg' style='width:{r['상승확률']}%'></div></div><div class='tiny'>{r['메모']} · {r['근거']}</div></div>", unsafe_allow_html=True)
 
 with tabs[5]:
     for stock,sc,lab,reason,x in sorted(all_news,key=lambda z:z[1],reverse=True):
