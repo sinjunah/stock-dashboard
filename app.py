@@ -5,7 +5,7 @@ import pandas as pd
 import requests, streamlit as st, yfinance as yf
 
 st.set_page_config(page_title="AI 주식 레이더",page_icon="📈",layout="wide",initial_sidebar_state="expanded")
-STOCKS_FILE="stocks.json"; PORTFOLIO_FILE="portfolio.json"; MEMO_FILE="memos.json"; LOG_FILE="prediction_log.csv"
+STOCKS_FILE="stocks.json"; PORTFOLIO_FILE="portfolio.json"; MEMO_FILE="memos.json"; LOG_FILE="prediction_log.csv"; NXT_PRICE_FILE="nxt_prices.json"
 
 DEFAULT_STOCKS={"삼성전자":"005930.KS","SK하이닉스":"000660.KS","엔비디아":"NVDA","테슬라":"TSLA","AMD":"AMD","SOXL":"SOXL","SOXS":"SOXS","TQQQ":"TQQQ","SQQQ":"SQQQ","대우건설":"047040.KS","샌디스크":"SNDK","KODEX 레버리지":"122630.KS","KODEX 200선물인버스2X":"252670.KS"}
 SEARCH_MAP={
@@ -47,6 +47,24 @@ def fx_rate():
 def money(v):
     try:return f"{v:,.0f}원"
     except Exception:return "0원"
+
+def load_nxt_prices():
+    return rjson(NXT_PRICE_FILE, {})
+
+def save_nxt_prices(data):
+    wjson(NXT_PRICE_FILE, data)
+
+def nxt_override_price(ticker):
+    data = load_nxt_prices()
+    item = data.get(ticker)
+    if isinstance(item, dict):
+        try:
+            p = float(item.get("price", 0))
+            if p > 0:
+                return p, item.get("time", "")
+        except Exception:
+            pass
+    return None, ""
 
 @st.cache_data(ttl=20)
 def naver_kr_price(code):
@@ -90,14 +108,29 @@ def yahoo_price_fast(t):
 
 @st.cache_data(ttl=60)
 def price(t):
-    # 한국 주식/ETF: 네이버 현재가 우선, 차트는 yfinance로 보조
+    # 한국 주식/ETF: NXT 수동 기준가가 있으면 최우선. 없으면 네이버 현재가 사용.
     if is_kr(t):
         code=kr_code(t)
+        override, override_time = nxt_override_price(t)
         nv=naver_kr_price(code)
         try:
             h=yf.Ticker(t).history(period="6mo",interval="1d")
         except Exception:
             h=pd.DataFrame()
+        if override:
+            last=override
+            chg=0.0
+            if h is not None and not h.empty:
+                c0=h["Close"].dropna()
+                if len(c0):
+                    prev=float(c0.iloc[-1])
+                    chg=(last-prev)/prev*100 if prev else 0
+            if h is None or h.empty:
+                h=pd.DataFrame({"Close":[last]})
+            c=h["Close"].dropna()
+            ma=lambda n: float(c.tail(n).mean()) if len(c) else last
+            src="NXT 입력값" + (f" · {override_time}" if override_time else "")
+            return {"hist":h,"last":last,"last_krw":last,"chg":chg,"ma5":ma(5),"ma20":ma(20),"ma60":ma(60),"hi20":float(c.tail(20).max()) if len(c) else last,"lo20":float(c.tail(20).min()) if len(c) else last,"source":src}
         if nv:
             last,chg,src=nv
             if h is None or h.empty:
@@ -197,6 +230,19 @@ with st.sidebar:
     st.header("⚙️ 설정")
     auto=st.toggle("자동 새로고침",True); sec=st.slider("간격(초)",60,600,180,30)
     if auto: st.markdown(f"<meta http-equiv='refresh' content='{sec}'>",unsafe_allow_html=True)
+    st.divider()
+    st.subheader("🟣 NXT 가격 직접 입력")
+    st.caption("토스 NXT 애프터마켓 가격을 여기에 넣으면 국장 가격은 이 값으로 계산됨.")
+    nxt_data = load_nxt_prices()
+    nxt_pick = st.selectbox("NXT 가격 수정", ["선택 안 함"] + [n for n,t in stocks.items() if is_kr(t)])
+    if nxt_pick != "선택 안 함":
+        nxt_ticker = stocks[nxt_pick]
+        old_p = float(nxt_data.get(nxt_ticker, {}).get("price", 0) or 0)
+        new_p = st.number_input(f"{nxt_pick} NXT 가격", min_value=0.0, value=old_p, step=100.0, format="%.0f")
+        if st.button("NXT 가격 저장", use_container_width=True):
+            nxt_data[nxt_ticker] = {"price": new_p, "time": datetime.now().strftime("%m/%d %H:%M")}
+            save_nxt_prices(nxt_data)
+            st.success("저장됨. 새로고침하면 반영.")
     st.divider(); st.subheader("⭐ 종목 찾기")
     q=st.text_input("종목 이름만 입력",placeholder="레버리지 / 인버스 / SOXL / 샌디스크 / 대우건설")
     cs=candidates(q) if q else []; selected=None
@@ -209,7 +255,7 @@ with st.sidebar:
     if st.button("삭제",use_container_width=True) and rm!="선택 안 함":
         stocks.pop(rm,None); portfolio.pop(rm,None); memos.get("stock",{}).pop(rm,None); wjson(STOCKS_FILE,stocks); wjson(PORTFOLIO_FILE,portfolio); wjson(MEMO_FILE,memos)
 
-st.markdown("<div class='hero'><h1>📈 AI 주식 레이더</h1><div>국내는 네이버 현재가 우선 · 미국은 Yahoo 실시간성 데이터 · 원화 기준 표시</div></div>",unsafe_allow_html=True)
+st.markdown("<div class='hero'><h1>📈 AI 주식 레이더</h1><div>국내는 NXT 입력값 우선 · 없으면 네이버 현재가 · 미국은 원화 환산</div></div>",unsafe_allow_html=True)
 st.caption(f"업데이트: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} · 예측기간: {period_text()} · 환율: 1달러 ≈ {fx_rate():,.0f}원")
 tabs=st.tabs(["🏠 메인","🔎 종목 상세","🚨 긴급 속보","📅 전체 캘린더","📊 종목 카드","📰 뉴스","📈 차트","🎯 기록"])
 cache={}; rows=[]; radar=[]; all_news=[]
@@ -270,4 +316,4 @@ with tabs[7]:
     log=load_log()
     if log.empty: st.info("아직 기록 없음.")
     else: st.dataframe(log,use_container_width=True); st.download_button("CSV 다운로드",log.to_csv(index=False,encoding="utf-8-sig"),"prediction_log.csv")
-st.warning("투자 보조용 도구야. 가격은 무료 공개 데이터 기준이라 증권사 체결가·환율과 완전히 같을 수는 없음.")
+st.warning("투자 보조용 도구야. NXT 실시간 API가 없어서 국장은 토스 NXT 가격을 입력하면 그 값을 최우선으로 사용함.")
